@@ -110,7 +110,56 @@ def get_recent_github_activity(
 def get_authenticated_user():
     """Get information about the authenticated GitHub user"""
     try:
-        username = github_client._get_authenticated_user()
-        return {"username": username}
+        user_info = github_client.get_user_info()
+        if not user_info:
+            raise HTTPException(status_code=404, detail="User information not found")
+        return user_info
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error getting user info: {e}")
+
+@router.get("/user/{username}", response_model=dict)
+def get_user_info(username: str):
+    """Get information about a specific GitHub user"""
+    try:
+        user_info = github_client.get_user_info(username)
+        if not user_info:
+            raise HTTPException(status_code=404, detail=f"User {username} not found")
+        return user_info
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting user info: {e}")
+
+@router.get("/repositories/details", response_model=List[dict])
+def get_repository_details():
+    """Get detailed information about repositories"""
+    try:
+        return github_client.get_repository_details()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching repository details: {e}")
+
+@router.get("/user/organizations", response_model=List[dict])
+def get_user_organizations(username: Optional[str] = Query(None, description="Username (defaults to authenticated user)")):
+    """Get organizations for a user"""
+    try:
+        return github_client.get_user_organizations(username)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching user organizations: {e}")
+
+@router.get("/repositories/{repository}/contributors", response_model=List[dict])
+def get_repository_contributors(repository: str):
+    """Get contributors for a repository"""
+    try:
+        return github_client.get_repository_contributors(repository)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching repository contributors: {e}")
+
+@router.get("/repositories/{repository}/issues", response_model=List[dict])
+def get_repository_issues(
+    repository: str,
+    creator: Optional[str] = Query(None, description="Issue creator"),
+    state: str = Query("all", description="Issue state (open, closed, all)")
+):
+    """Get issues for a repository"""
+    try:
+        return github_client.get_repository_issues(repository, creator, state)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching repository issues: {e}")

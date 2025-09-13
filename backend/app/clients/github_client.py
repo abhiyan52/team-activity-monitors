@@ -1,25 +1,27 @@
-import requests
+from github import Github
+from github.GithubException import GithubException
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
 from app.core.config import settings
 from app.models.schemas import GitHubCommit, GitHubPullRequest, GitHubResponse, GitHubFilter
 
+
 class GitHubClient:
     def __init__(self):
         self.token = settings.github_token
         self.organization = settings.github_organization
-        self.base_url = "https://api.github.com"
-        self.session = requests.Session()
+        self.github = None
         
         if self.token:
-            self.session.headers.update({
-                "Authorization": f"token {self.token}",
-                "Accept": "application/vnd.github.v3+json"
-            })
+            try:
+                self.github = Github(self.token)
+            except GithubException as e:
+                print(f"Failed to initialize GitHub client: {e}")
+                self.github = None
     
     def _is_configured(self) -> bool:
         """Check if GitHub client is properly configured"""
-        return bool(self.token)
+        return bool(self.token and self.github)
     
     def get_repositories(self) -> List[str]:
         """Get list of repositories for the organization or user"""
@@ -27,16 +29,55 @@ class GitHubClient:
             return []
         
         try:
+            repos = []
             if self.organization:
-                url = f"{self.base_url}/orgs/{self.organization}/repos"
+                # Get repositories from organization
+                org = self.github.get_organization(self.organization)
+                for repo in org.get_repos():
+                    repos.append(repo.name)
             else:
-                url = f"{self.base_url}/user/repos"
+                # Get repositories for authenticated user
+                for repo in self.github.get_user().get_repos():
+                    repos.append(repo.name)
             
-            response = self._make_request("GET", url, params={"per_page": 100})
-            return [repo["name"] for repo in response]
+            return repos
             
-        except Exception as e:
+        except GithubException as e:
             print(f"Error fetching repositories: {e}")
+            return []
+    
+    def get_repository_details(self) -> List[Dict[str, Any]]:
+        """Get detailed information about repositories"""
+        if not self._is_configured():
+            return []
+        
+        try:
+            repos = []
+            if self.organization:
+                # Get repositories from organization
+                org = self.github.get_organization(self.organization)
+                repo_list = org.get_repos()
+            else:
+                # Get repositories for authenticated user
+                repo_list = self.github.get_user().get_repos()
+            
+            for repo in repo_list:
+                repos.append({
+                    "name": repo.name,
+                    "full_name": repo.full_name,
+                    "private": repo.private,
+                    "description": repo.description,
+                    "language": repo.language,
+                    "stars": repo.stargazers_count,
+                    "forks": repo.forks_count,
+                    "updated_at": repo.updated_at.isoformat() if repo.updated_at else None,
+                    "html_url": repo.html_url
+                })
+            
+            return repos
+            
+        except GithubException as e:
+            print(f"Error fetching repository details: {e}")
             return []
     
     def get_commits(self, repositories: List[str], filters: GitHubFilter) -> List[GitHubCommit]:
@@ -48,34 +89,48 @@ class GitHubClient:
         
         for repo_name in repositories:
             try:
-                params = {"per_page": 30}
+                # Get repository object
+                if self.organization:
+                    repo = self.github.get_repo(f"{self.organization}/{repo_name}")
+                else:
+                    user = self.github.get_user()
+                    repo = self.github.get_repo(f"{user.login}/{repo_name}")
+                
+                # Build parameters for commit query
+                kwargs = {}
                 
                 if filters.author:
-                    params["author"] = filters.author
+                    kwargs["author"] = filters.author
                 
                 if filters.since:
-                    params["since"] = filters.since.isoformat()
+                    kwargs["since"] = filters.since
                 
                 if filters.branch:
-                    params["sha"] = filters.branch
+                    kwargs["sha"] = filters.branch
                 
-                owner = self.organization or self._get_authenticated_user()
-                url = f"{self.base_url}/repos/{owner}/{repo_name}/commits"
+                # Get commits
+                commits = repo.get_commits(**kwargs)
                 
-                response = self._make_request("GET", url, params=params)
+                # Limit to avoid too many API calls
+                commit_count = 0
+                max_commits = 30
                 
-                for commit_data in response:
-                    commit = GitHubCommit(
-                        sha=commit_data["sha"],
-                        message=commit_data["commit"]["message"],
-                        author=commit_data["commit"]["author"]["name"],
-                        date=datetime.fromisoformat(commit_data["commit"]["author"]["date"].replace("Z", "+00:00")),
-                        url=commit_data["html_url"],
+                for commit in commits:
+                    if commit_count >= max_commits:
+                        break
+                    
+                    github_commit = GitHubCommit(
+                        sha=commit.sha,
+                        message=commit.commit.message,
+                        author=commit.commit.author.name,
+                        date=commit.commit.author.date,
+                        url=commit.html_url,
                         repository=repo_name
                     )
-                    all_commits.append(commit)
+                    all_commits.append(github_commit)
+                    commit_count += 1
                     
-            except Exception as e:
+            except GithubException as e:
                 print(f"Error fetching commits for {repo_name}: {e}")
                 continue
         
@@ -90,44 +145,48 @@ class GitHubClient:
         
         for repo_name in repositories:
             try:
-                params = {
-                    "state": "all",
-                    "per_page": 30,
-                    "sort": "updated",
-                    "direction": "desc"
-                }
+                # Get repository object
+                if self.organization:
+                    repo = self.github.get_repo(f"{self.organization}/{repo_name}")
+                else:
+                    user = self.github.get_user()
+                    repo = self.github.get_repo(f"{user.login}/{repo_name}")
                 
-                owner = self.organization or self._get_authenticated_user()
-                url = f"{self.base_url}/repos/{owner}/{repo_name}/pulls"
+                # Get pull requests
+                prs = repo.get_pulls(state='all', sort='updated', direction='desc')
                 
-                response = self._make_request("GET", url, params=params)
+                # Limit to avoid too many API calls
+                pr_count = 0
+                max_prs = 30
                 
-                for pr_data in response:
+                for pr in prs:
+                    if pr_count >= max_prs:
+                        break
+                    
                     # Filter by author if specified
-                    if filters.author and pr_data["user"]["login"] != filters.author:
+                    if filters.author and pr.user.login != filters.author:
                         continue
                     
                     # Filter by date if specified
-                    if filters.since:
-                        updated_at = datetime.fromisoformat(pr_data["updated_at"].replace("Z", "+00:00"))
-                        if updated_at < filters.since:
-                            continue
+                    if filters.since and pr.updated_at < filters.since:
+                        continue
                     
-                    pr = GitHubPullRequest(
-                        number=pr_data["number"],
-                        title=pr_data["title"],
-                        state=pr_data["state"],
-                        author=pr_data["user"]["login"],
-                        created_at=datetime.fromisoformat(pr_data["created_at"].replace("Z", "+00:00")),
-                        updated_at=datetime.fromisoformat(pr_data["updated_at"].replace("Z", "+00:00")),
-                        url=pr_data["html_url"],
+                    github_pr = GitHubPullRequest(
+                        number=pr.number,
+                        title=pr.title,
+                        state=pr.state,
+                        author=pr.user.login,
+                        created_at=pr.created_at,
+                        updated_at=pr.updated_at,
+                        url=pr.html_url,
                         repository=repo_name,
-                        merged=pr_data["merged"],
-                        merged_at=datetime.fromisoformat(pr_data["merged_at"].replace("Z", "+00:00")) if pr_data["merged_at"] else None
+                        merged=pr.merged,
+                        merged_at=pr.merged_at
                     )
-                    all_prs.append(pr)
+                    all_prs.append(github_pr)
+                    pr_count += 1
                     
-            except Exception as e:
+            except GithubException as e:
                 print(f"Error fetching pull requests for {repo_name}: {e}")
                 continue
         
@@ -163,19 +222,150 @@ class GitHubClient:
             repositories=repositories
         )
     
+    def get_user_info(self, username: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Get information about a GitHub user"""
+        if not self._is_configured():
+            return None
+        
+        try:
+            if username:
+                user = self.github.get_user(username)
+            else:
+                user = self.github.get_user()
+            
+            return {
+                "login": user.login,
+                "name": user.name,
+                "email": user.email,
+                "avatar_url": user.avatar_url,
+                "bio": user.bio,
+                "company": user.company,
+                "location": user.location,
+                "public_repos": user.public_repos,
+                "followers": user.followers,
+                "following": user.following,
+                "created_at": user.created_at.isoformat() if user.created_at else None,
+                "html_url": user.html_url
+            }
+            
+        except GithubException as e:
+            print(f"Error fetching user info: {e}")
+            return None
+    
+    def get_user_organizations(self, username: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Get organizations for a user"""
+        if not self._is_configured():
+            return []
+        
+        try:
+            if username:
+                user = self.github.get_user(username)
+            else:
+                user = self.github.get_user()
+            
+            orgs = []
+            for org in user.get_orgs():
+                orgs.append({
+                    "login": org.login,
+                    "name": org.name,
+                    "description": org.description,
+                    "avatar_url": org.avatar_url,
+                    "html_url": org.html_url
+                })
+            
+            return orgs
+            
+        except GithubException as e:
+            print(f"Error fetching user organizations: {e}")
+            return []
+    
+    def get_repository_contributors(self, repository: str) -> List[Dict[str, Any]]:
+        """Get contributors for a repository"""
+        if not self._is_configured():
+            return []
+        
+        try:
+            # Get repository object
+            if self.organization:
+                repo = self.github.get_repo(f"{self.organization}/{repository}")
+            else:
+                user = self.github.get_user()
+                repo = self.github.get_repo(f"{user.login}/{repository}")
+            
+            contributors = []
+            for contrib in repo.get_contributors():
+                contributors.append({
+                    "login": contrib.login,
+                    "name": contrib.name,
+                    "avatar_url": contrib.avatar_url,
+                    "contributions": contrib.contributions,
+                    "html_url": contrib.html_url
+                })
+            
+            return contributors
+            
+        except GithubException as e:
+            print(f"Error fetching repository contributors: {e}")
+            return []
+    
+    def get_repository_issues(self, repository: str, creator: Optional[str] = None, state: str = "all") -> List[Dict[str, Any]]:
+        """Get issues for a repository"""
+        if not self._is_configured():
+            return []
+        
+        try:
+            # Get repository object
+            if self.organization:
+                repo = self.github.get_repo(f"{self.organization}/{repository}")
+            else:
+                user = self.github.get_user()
+                repo = self.github.get_repo(f"{user.login}/{repository}")
+            
+            kwargs = {"state": state}
+            if creator:
+                kwargs["creator"] = creator
+            
+            issues = []
+            issue_count = 0
+            max_issues = 50
+            
+            for issue in repo.get_issues(**kwargs):
+                if issue_count >= max_issues:
+                    break
+                
+                # Skip pull requests (they appear as issues in GitHub API)
+                if issue.pull_request:
+                    continue
+                
+                issues.append({
+                    "number": issue.number,
+                    "title": issue.title,
+                    "state": issue.state,
+                    "author": issue.user.login,
+                    "created_at": issue.created_at.isoformat(),
+                    "updated_at": issue.updated_at.isoformat(),
+                    "body": issue.body,
+                    "labels": [label.name for label in issue.labels],
+                    "html_url": issue.html_url
+                })
+                issue_count += 1
+            
+            return issues
+            
+        except GithubException as e:
+            print(f"Error fetching repository issues: {e}")
+            return []
+    
     def _get_authenticated_user(self) -> str:
         """Get the username of the authenticated user"""
-        try:
-            response = self._make_request("GET", f"{self.base_url}/user")
-            return response["login"]
-        except Exception:
+        if not self._is_configured():
             return "unknown"
-    
-    def _make_request(self, method: str, url: str, **kwargs) -> Dict[str, Any]:
-        """Make HTTP request to GitHub API"""
-        response = self.session.request(method, url, **kwargs)
-        response.raise_for_status()
-        return response.json()
+        
+        try:
+            user = self.github.get_user()
+            return user.login
+        except GithubException:
+            return "unknown"
     
     def test_connection(self) -> bool:
         """Test GitHub connection"""
@@ -183,7 +373,7 @@ class GitHubClient:
             return False
         
         try:
-            response = self._make_request("GET", f"{self.base_url}/user")
-            return bool(response.get("login"))
-        except Exception:
+            user = self.github.get_user()
+            return bool(user.login)
+        except GithubException:
             return False
