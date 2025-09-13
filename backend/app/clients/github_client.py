@@ -168,8 +168,18 @@ class GitHubClient:
                         continue
                     
                     # Filter by date if specified
-                    if filters.since and pr.updated_at < filters.since:
-                        continue
+                    if filters.since:
+                        # Ensure both datetimes are timezone-aware for comparison
+                        pr_updated = pr.updated_at
+                        if pr_updated.tzinfo is None:
+                            pr_updated = pr_updated.replace(tzinfo=filters.since.tzinfo)
+                        elif filters.since.tzinfo is None:
+                            filters_since = filters.since.replace(tzinfo=pr_updated.tzinfo)
+                        else:
+                            filters_since = filters.since
+                        
+                        if pr_updated < filters_since:
+                            continue
                     
                     github_pr = GitHubPullRequest(
                         number=pr.number,
