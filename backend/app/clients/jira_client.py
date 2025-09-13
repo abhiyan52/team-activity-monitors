@@ -160,7 +160,7 @@ class JiraClient:
         try:
             users = self.jira.search_assignable_users_for_projects(
                 username='',
-                project=project_key,
+                projectKeys=project_key,
                 maxResults=max_results
             )
             return [
