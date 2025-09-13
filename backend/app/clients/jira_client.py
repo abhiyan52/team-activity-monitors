@@ -1,26 +1,35 @@
-import requests
+from jira import JIRA
+from jira.exceptions import JIRAError
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
 from app.core.config import settings
 from app.models.schemas import JiraIssue, JiraResponse, JiraIssueFilter
 
+
 class JiraClient:
     def __init__(self):
         self.server_url = settings.jira_server_url
-        self.username = settings.jira_username
+        self.email = settings.jira_email
         self.api_token = settings.jira_api_token
-        self.session = requests.Session()
+        self.jira = None
         
-        if self.username and self.api_token:
-            self.session.auth = (self.username, self.api_token)
+        if self._is_configured():
+            try:
+                self.jira = JIRA(
+                    server=self.server_url,
+                    basic_auth=(self.email, self.api_token)
+                )
+            except JIRAError as e:
+                print(f"Failed to initialize JIRA client: {e}")
+                self.jira = None
     
     def _is_configured(self) -> bool:
         """Check if JIRA client is properly configured"""
-        return bool(self.server_url and self.username and self.api_token)
+        return bool(self.server_url and self.email and self.api_token)
     
     def search_issues(self, filters: JiraIssueFilter, max_results: int = 50) -> JiraResponse:
         """Search for JIRA issues based on filters"""
-        if not self._is_configured():
+        if not self._is_configured() or not self.jira:
             return JiraResponse(issues=[], total_count=0, filtered_count=0)
         
         # Build JQL query
@@ -30,13 +39,25 @@ class JiraClient:
             jql_parts.append(f"project = {filters.project_key}")
         
         if filters.assignee:
-            jql_parts.append(f"assignee = '{filters.assignee}'")
+            # Handle both email and account ID formats
+            if "@" in filters.assignee:
+                # Try to find user by email first
+                try:
+                    users = self.jira.search_users(query=filters.assignee, maxResults=1)
+                    if users:
+                        jql_parts.append(f'assignee = "{users[0].accountId}"')
+                    else:
+                        jql_parts.append(f'assignee = "{filters.assignee}"')
+                except JIRAError:
+                    jql_parts.append(f'assignee = "{filters.assignee}"')
+            else:
+                jql_parts.append(f'assignee = "{filters.assignee}"')
         
         if filters.status:
-            jql_parts.append(f"status = '{filters.status}'")
+            jql_parts.append(f'status = "{filters.status}"')
         
         if filters.issue_type:
-            jql_parts.append(f"issuetype = '{filters.issue_type}'")
+            jql_parts.append(f'issuetype = "{filters.issue_type}"')
         
         if filters.created_after:
             date_str = filters.created_after.strftime("%Y-%m-%d")
@@ -46,44 +67,43 @@ class JiraClient:
             date_str = filters.updated_after.strftime("%Y-%m-%d")
             jql_parts.append(f"updated >= '{date_str}'")
         
-        jql = " AND ".join(jql_parts) if jql_parts else "order by updated DESC"
+        if jql_parts:
+            jql = " AND ".join(jql_parts) + " order by updated DESC"
+        else:
+            # Add a default time restriction to avoid unbounded queries
+            default_date = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+            jql = f"updated >= '{default_date}' order by updated DESC"
         
         try:
-            response = self._make_request(
-                "GET",
-                f"{self.server_url}/rest/api/2/search",
-                params={
-                    "jql": jql,
-                    "maxResults": max_results,
-                    "fields": "key,summary,status,assignee,priority,issuetype,created,updated,description"
-                }
+            issues_result = self.jira.search_issues(
+                jql_str=jql,
+                maxResults=max_results,
+                fields="key,summary,status,assignee,priority,issuetype,created,updated,description"
             )
             
             issues = []
-            for issue_data in response.get("issues", []):
-                fields = issue_data["fields"]
-                
-                issue = JiraIssue(
-                    key=issue_data["key"],
-                    summary=fields.get("summary", ""),
-                    status=fields.get("status", {}).get("name", "Unknown"),
-                    assignee=fields.get("assignee", {}).get("displayName") if fields.get("assignee") else None,
-                    priority=fields.get("priority", {}).get("name") if fields.get("priority") else None,
-                    issue_type=fields.get("issuetype", {}).get("name", "Unknown"),
-                    created=datetime.fromisoformat(fields["created"].replace("Z", "+00:00")),
-                    updated=datetime.fromisoformat(fields["updated"].replace("Z", "+00:00")),
-                    description=fields.get("description", ""),
-                    url=f"{self.server_url}/browse/{issue_data['key']}"
+            for issue in issues_result:
+                jira_issue = JiraIssue(
+                    key=issue.key,
+                    summary=issue.fields.summary or "",
+                    status=issue.fields.status.name if issue.fields.status else "Unknown",
+                    assignee=issue.fields.assignee.displayName if issue.fields.assignee else None,
+                    priority=issue.fields.priority.name if issue.fields.priority else None,
+                    issue_type=issue.fields.issuetype.name if issue.fields.issuetype else "Unknown",
+                    created=datetime.fromisoformat(str(issue.fields.created).replace("Z", "+00:00")),
+                    updated=datetime.fromisoformat(str(issue.fields.updated).replace("Z", "+00:00")),
+                    description=issue.fields.description or "",
+                    url=f"{self.server_url}/browse/{issue.key}"
                 )
-                issues.append(issue)
+                issues.append(jira_issue)
             
             return JiraResponse(
                 issues=issues,
-                total_count=response.get("total", 0),
+                total_count=issues_result.total,
                 filtered_count=len(issues)
             )
             
-        except Exception as e:
+        except JIRAError as e:
             print(f"Error fetching JIRA issues: {e}")
             return JiraResponse(issues=[], total_count=0, filtered_count=0)
     
@@ -112,19 +132,136 @@ class JiraClient:
         
         return self.search_issues(filters)
     
-    def _make_request(self, method: str, url: str, **kwargs) -> Dict[str, Any]:
-        """Make HTTP request to JIRA API"""
-        response = self.session.request(method, url, **kwargs)
-        response.raise_for_status()
-        return response.json()
+    def get_projects(self) -> List[Dict[str, Any]]:
+        """Get list of all JIRA projects"""
+        if not self._is_configured() or not self.jira:
+            return []
+        
+        try:
+            projects = self.jira.projects()
+            return [
+                {
+                    "key": project.key,
+                    "name": project.name,
+                    "id": project.id,
+                    "lead": project.lead.displayName if hasattr(project, 'lead') and project.lead else None
+                }
+                for project in projects
+            ]
+        except JIRAError as e:
+            print(f"Error fetching JIRA projects: {e}")
+            return []
+    
+    def get_project_users(self, project_key: str, max_results: int = 50) -> List[Dict[str, Any]]:
+        """Get list of assignable users for a specific project"""
+        if not self._is_configured() or not self.jira:
+            return []
+        
+        try:
+            users = self.jira.search_assignable_users_for_projects(
+                username='',
+                project=project_key,
+                maxResults=max_results
+            )
+            return [
+                {
+                    "accountId": user.accountId,
+                    "displayName": user.displayName,
+                    "emailAddress": getattr(user, 'emailAddress', None),
+                    "active": getattr(user, 'active', True)
+                }
+                for user in users
+            ]
+        except JIRAError as e:
+            print(f"Error fetching project users: {e}")
+            return []
+    
+    def search_users(self, query: str, max_results: int = 20) -> List[Dict[str, Any]]:
+        """Search for users by name or email"""
+        if not self._is_configured() or not self.jira:
+            return []
+        
+        try:
+            users = self.jira.search_users(query=query, maxResults=max_results)
+            return [
+                {
+                    "accountId": user.accountId,
+                    "displayName": user.displayName,
+                    "emailAddress": getattr(user, 'emailAddress', None),
+                    "active": getattr(user, 'active', True)
+                }
+                for user in users
+            ]
+        except JIRAError as e:
+            print(f"Error searching users: {e}")
+            return []
+    
+    def get_issue_details(self, issue_key: str) -> Optional[Dict[str, Any]]:
+        """Get detailed information about a specific issue"""
+        if not self._is_configured() or not self.jira:
+            return None
+        
+        try:
+            issue = self.jira.issue(issue_key)
+            
+            # Get comments
+            comments = []
+            try:
+                issue_comments = self.jira.comments(issue_key)
+                comments = [
+                    {
+                        "author": comment.author.displayName,
+                        "body": comment.body,
+                        "created": str(comment.created)
+                    }
+                    for comment in issue_comments
+                ]
+            except JIRAError:
+                # Comments might not be accessible
+                pass
+            
+            # Get transitions
+            transitions = []
+            try:
+                issue_transitions = self.jira.transitions(issue)
+                transitions = [
+                    {
+                        "id": transition['id'],
+                        "name": transition['name']
+                    }
+                    for transition in issue_transitions
+                ]
+            except JIRAError:
+                # Transitions might not be accessible
+                pass
+            
+            return {
+                "key": issue.key,
+                "summary": issue.fields.summary,
+                "description": issue.fields.description or "",
+                "status": issue.fields.status.name if issue.fields.status else "Unknown",
+                "assignee": issue.fields.assignee.displayName if issue.fields.assignee else None,
+                "priority": issue.fields.priority.name if issue.fields.priority else None,
+                "issue_type": issue.fields.issuetype.name if issue.fields.issuetype else "Unknown",
+                "created": str(issue.fields.created),
+                "updated": str(issue.fields.updated),
+                "url": f"{self.server_url}/browse/{issue.key}",
+                "comments": comments,
+                "transitions": transitions
+            }
+            
+        except JIRAError as e:
+            print(f"Error fetching issue details: {e}")
+            return None
     
     def test_connection(self) -> bool:
         """Test JIRA connection"""
-        if not self._is_configured():
+        if not self._is_configured() or not self.jira:
             return False
         
         try:
-            response = self._make_request("GET", f"{self.server_url}/rest/api/2/myself")
-            return bool(response.get("accountId"))
-        except Exception:
+            # Try to get current user info
+            myself = self.jira.myself()
+            return bool(myself.get('accountId'))
+        except JIRAError:
             return False
