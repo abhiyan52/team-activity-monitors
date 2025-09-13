@@ -75,13 +75,36 @@ def get_recent_jira_activity(
 @router.get("/projects", response_model=List[dict])
 def get_jira_projects():
     """Get list of available JIRA projects"""
-    # This would require additional implementation in the JIRA client
-    # For now, return a placeholder
-    return [{"message": "Project listing not yet implemented"}]
+    try:
+        return jira_client.get_projects()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching JIRA projects: {e}")
 
 @router.get("/users", response_model=List[dict])
-def get_jira_users():
+def get_jira_users(
+    query: Optional[str] = Query(None, description="Search query for users"),
+    project_key: Optional[str] = Query(None, description="Project key to get assignable users"),
+    max_results: int = Query(20, description="Maximum number of results")
+):
     """Get list of JIRA users (for team member suggestions)"""
-    # This would require additional implementation in the JIRA client
-    # For now, return a placeholder
-    return [{"message": "User listing not yet implemented"}]
+    try:
+        if project_key:
+            return jira_client.get_project_users(project_key, max_results)
+        elif query:
+            return jira_client.search_users(query, max_results)
+        else:
+            # Return empty list if no search criteria provided
+            return []
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching JIRA users: {e}")
+
+@router.get("/issues/{issue_key}", response_model=dict)
+def get_jira_issue_details(issue_key: str):
+    """Get detailed information about a specific JIRA issue"""
+    try:
+        issue_details = jira_client.get_issue_details(issue_key)
+        if not issue_details:
+            raise HTTPException(status_code=404, detail=f"Issue {issue_key} not found")
+        return issue_details
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching issue details: {e}")
