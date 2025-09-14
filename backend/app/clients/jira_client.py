@@ -265,3 +265,13 @@ class JiraClient:
             return bool(myself.get('accountId'))
         except JIRAError:
             return False
+
+    @property
+    def context(self) -> str:
+        projects = self.get_projects()
+
+        project_context = {"project_information": []}
+        for project in projects:
+            project["users"] = self.get_project_users(project["key"])
+            project_context["project_information"].append(project)
+        return project_context     
