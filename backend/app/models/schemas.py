@@ -1,6 +1,7 @@
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 from datetime import datetime
+# Using Pydantic v2 directly for better compatibility
 
 # Request Schemas
 class ActivityQueryRequest(BaseModel):
@@ -86,3 +87,25 @@ class ActivityLog(ActivityLogBase):
     
     class Config:
         from_attributes = True
+
+# Agent and LLM Schemas
+class ToolCall(BaseModel):
+    """Represents a single tool call to be executed by the agent."""
+    tool: str
+    action: str
+    parameters: Dict[str, Any] = {}
+
+class AgentIntent(BaseModel):
+    """
+    Represents the structured intent of a user query, parsed by the LLM.
+    This can involve one or more sequential tool calls.
+    """
+    tool_calls: List[ToolCall]
+
+class IrrelevantQueryError(BaseModel):
+    """
+    Represents a determination by the LLM that the user query is not
+    relevant to the available JIRA or GitHub tools.
+    """
+    error: str = "Query is not relevant to JIRA or GitHub activity."
+    reasoning: str
