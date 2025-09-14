@@ -89,18 +89,46 @@ class ActivityLog(ActivityLogBase):
         from_attributes = True
 
 # Agent and LLM Schemas
+class TimeRange(BaseModel):
+    start: Optional[datetime] = None
+    end: Optional[datetime] = None
+    label: Optional[str] = None  # e.g., 'this week', 'last month'
+
+class OperationStep(BaseModel):
+    tool: str  # "jira" or "github"
+    action: str  # e.g. "search_issues", "get_commits", "list_projects", "get_recent_activity"
+    filters: Optional[Dict[str, Any]] = None      # Accepts a JiraIssueFilter or GitHubFilter as dict
+    sort_by: Optional[str] = None                 # e.g. "created", "updated"
+    order: Optional[str] = None                   # "asc", "desc"
+    output_keys: Optional[List[str]] = None       # Which fields to extract
+    aggregation: Optional[str] = None             # e.g. "count", "group_by_status"
+
+class AgentIntent(BaseModel):
+    # Who/what is being queried
+    members: Optional[List[str]] = None                   # ["Sarah", "John"]
+    projects: Optional[List[str]] = None                  # ["PROJ", "API_BACKEND"]
+    repositories: Optional[List[str]] = None              # ["repo1", "repo2"]
+    organizations: Optional[List[str]] = None             # ["my-org"]
+
+    # Stepwise operations (for chaining/filtering)
+    operations: Optional[List[OperationStep]] = None      # Allow pipeline of actions
+
+    # High-level modifiers
+    time_range: Optional[TimeRange] = None
+    limit: Optional[int] = None
+    group_by: Optional[str] = None
+    intent: Optional[str] = None               # e.g. "status", "list", "summarize", "compare"
+    context: Optional[Dict[str, Any]] = None   # Memory/follow-up context
+
+    # Error fields
+    error_type: Optional[str] = None
+    error_message: Optional[str] = None
+
 class ToolCall(BaseModel):
     """Represents a single tool call to be executed by the agent."""
     tool: str
     action: str
     parameters: Dict[str, Any] = {}
-
-class AgentIntent(BaseModel):
-    """
-    Represents the structured intent of a user query, parsed by the LLM.
-    This can involve one or more sequential tool calls.
-    """
-    tool_calls: List[ToolCall]
 
 class IrrelevantQueryError(BaseModel):
     """
@@ -109,3 +137,12 @@ class IrrelevantQueryError(BaseModel):
     """
     error: str = "Query is not relevant to JIRA or GitHub activity."
     reasoning: str
+
+class IntentParserResponse(BaseModel):
+    """
+    Unified response schema for intent parsing that can handle both
+    relevant and irrelevant queries.
+    """
+    is_relevant: bool
+    agent_intent: Optional[AgentIntent] = None
+    error: Optional[IrrelevantQueryError] = None
