@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import Message from './Message';
-import { queryTeamActivity } from '../api/activityApi';
+import { queryTeamActivity, createConversationThread, sendMessage } from '../api/conversationApi';
 
 const Chat = ({ systemStatus }) => {
   const [messages, setMessages] = useState([

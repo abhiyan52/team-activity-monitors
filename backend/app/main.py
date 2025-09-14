@@ -1,7 +1,8 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.api import routes_jira, routes_github, routes_activity
+from app.api import routes_conversation
 from app.core.config import settings
+from app.core.database import create_tables
 
 app = FastAPI(
     title="Team Activity Monitor API",
@@ -18,10 +19,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Create database tables on startup
+@app.on_event("startup")
+async def startup_event():
+    create_tables()
+
 # Include routers
-app.include_router(routes_jira.router, prefix="/api/jira", tags=["jira"])
-app.include_router(routes_github.router, prefix="/api/github", tags=["github"])
-app.include_router(routes_activity.router, prefix="/api/activity", tags=["activity"])
+app.include_router(routes_conversation.router, tags=["conversations"])
 
 @app.get("/")
 def read_root():
