@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     # OpenAI Configuration (for chatbot responses)
     openai_api_key: Optional[str] = os.getenv("OPENAI_API_KEY")
     
+    # Google Gemini Configuration
+    google_api_key: Optional[str] = os.getenv("GOOGLE_API_KEY")
+    
     # Application Settings
     debug: bool = False
     log_level: str = "INFO"
