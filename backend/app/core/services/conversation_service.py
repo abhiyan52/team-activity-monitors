@@ -8,7 +8,7 @@ from datetime import datetime
 import json
 
 from app.models.conversation_models import ConversationThread, ConversationMessage, AgentSession
-from app.core.services.enhanced_integrated_agent import EnhancedIntegratedAgent
+from app.core.services.basic_agent import BasicAgent, get_agent_for_thread
 
 
 class ConversationService:
@@ -167,7 +167,7 @@ class ConversationService:
             ConversationMessage.thread_id == thread_id
         ).order_by(asc(ConversationMessage.created_at)).offset(offset).limit(limit).all()
     
-    def get_agent_for_thread(self, thread_id: str) -> EnhancedIntegratedAgent:
+    def get_agent_for_thread(self, thread_id: str) -> BasicAgent:
         """
         Get or create an agent instance for a thread.
         This ensures memory persistence across requests.
@@ -176,25 +176,24 @@ class ConversationService:
             thread_id: Thread ID
             
         Returns:
-            EnhancedIntegratedAgent instance
+            BasicAgent instance
         """
         if thread_id not in self._agent_instances:
             # Create new agent instance for this thread
-            agent = EnhancedIntegratedAgent()
+            agent = get_agent_for_thread(thread_id)
             
             # Load existing conversation history into agent memory
             messages = self.get_messages(thread_id)
+            conversation_history = []
+            
             for message in messages:
-                if message.role == "user":
-                    # Find the corresponding assistant response
-                    next_message = self.db.query(ConversationMessage).filter(
-                        ConversationMessage.thread_id == thread_id,
-                        ConversationMessage.created_at > message.created_at,
-                        ConversationMessage.role == "assistant"
-                    ).order_by(asc(ConversationMessage.created_at)).first()
-                    
-                    if next_message:
-                        agent.add_to_memory(message.content, next_message.content)
+                conversation_history.append({
+                    'role': message.role,
+                    'content': message.content
+                })
+            
+            if conversation_history:
+                agent.load_conversation_history(conversation_history)
             
             self._agent_instances[thread_id] = agent
         

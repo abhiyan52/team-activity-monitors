@@ -1,359 +1,429 @@
-from typing import Dict, List, Union
-import json
-
+from typing import Dict, List
 from langchain_core.language_models import BaseLanguageModel
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import PydanticOutputParser
-from langchain.agents import create_tool_calling_agent, AgentExecutor
-
-from app.models.schemas import AgentIntent, IrrelevantQueryError, IntentParserResponse
-from app.core.tools import get_current_time
+from langchain_core.messages import HumanMessage, SystemMessage
 from app.clients.jira_client import JiraClient
+from datetime import datetime
 from app.clients.github_client import GitHubClient
 
 
 class AgentIntentParser:
+
+    _cached_context = {"jira": None, "github": None}
+
+
     def __init__(self, llm: BaseLanguageModel):
         self.llm = llm
         self.jira_client = JiraClient()
         self.github_client = GitHubClient()
-        self.output_parser = PydanticOutputParser(pydantic_object=IntentParserResponse)
-        
-        # Initialize the agent with datetime tool
-        self.tools = [get_current_time]
-        self.agent_prompt = self._create_agent_prompt()
-        self.agent = create_tool_calling_agent(self.llm, self.tools, self.agent_prompt)
-        self.agent_executor = AgentExecutor(agent=self.agent, tools=self.tools, verbose=True)
-
-    def _get_context_information(self) -> str:
-        """
-        Get comprehensive information about the context of the JIRA and GitHub projects.
-        """
-        return f"""
-        JIRA Context:
-        {self.jira_client.context}
-        """ + f"""
-        GitHub Context:
-        {self.github_client.context}
-        """
-
 
     def _get_tool_capabilities(self) -> str:
         """
         Get comprehensive information about available tools and their capabilities.
         """
         return """
-        AVAILABLE TOOLS FOR EXECUTION PLANNING:
+            ## Cross-Platform Tools
 
-        JIRA Tools:
-        1. search_jira_issues - Search JIRA issues with flexible filtering
-           Parameters: project_key, assignee, status, issue_type, max_results
-           Use for: Finding issues, tracking work, getting project status
+            ### 1. `get_recent_activity`
+            **Signature:** `get_recent_activity(team_members: Optional[List[str]] = None, days: int = 7, repositories: Optional[List[str]] = None, projects: Optional[List[str]] = None) -> str`
 
-        2. get_jira_projects - Get list of all JIRA projects
-           Parameters: None
-           Use for: Understanding available projects, project discovery
+            **When to use:**
+            - Get comprehensive activity from both JIRA and GitHub
+            - Monitor team activity across platforms
+            - Get unified activity summary
 
-        3. get_jira_project_users - Get assignable users for a project
-           Parameters: project_key, max_results
-           Use for: Finding team members, user validation
+            **Example:**
+            ```python
+            # Get activity for specific team members
+            get_recent_activity(team_members=["john", "jane"])
 
-        4. search_jira_users - Search users by name or email
-           Parameters: query, max_results
-           Use for: User discovery, name-to-username mapping
+            # Get activity for last month
+            get_recent_activity(days=30)
 
-        5. get_jira_issue_details - Get detailed issue information
-           Parameters: issue_key
-           Use for: Deep dive into specific issues
+            # Get activity for specific repositories and projects
+            get_recent_activity(repositories=["my-app"], projects=["PROJ"])
 
-        6. test_jira_connection - Test JIRA connectivity
-           Parameters: None
-           Use for: Troubleshooting, health checks
-
-        GitHub Tools:
-        1. get_github_commits - Get commits with filtering
-           Parameters: repositories, author, since_days, branch, limit
-           Use for: Code activity tracking, author contributions
-
-        2. get_github_pull_requests - Get pull requests with filtering
-           Parameters: repositories, author, since_days, state, limit
-           Use for: PR tracking, review activity, merge activity
-
-        3. get_github_repositories - Get all repositories with contributors
-           Parameters: None
-           Use for: Repository discovery, contributor information
-
-        4. get_github_repository_details - Get detailed repository info
-           Parameters: repository
-           Use for: Single repository deep dive, metadata
-
-        5. get_github_recent_activities - Get comprehensive user activities
-           Parameters: usernames, days, include_commits, include_prs, repositories
-           Use for: Team activity analysis, productivity tracking
+            # Get complete team overview
+            get_recent_activity()
+            ```
 
 
-        Combined Tools:
-        1. get_recent_activity - Get combined JIRA and GitHub activity
-           Parameters: team_members, days, repositories, projects
-           Use for: Comprehensive team activity overview
+            ## JIRA Tools
 
-        Utility Tools:
-        1. get_current_time - Get current date/time in various formats
-           Parameters: format_type ("time", "date", "datetime", "timestamp", "iso")
-           Use for: Date calculations, time-based filtering, current context
+            ### 1. `search_jira_issues`
+            **Signature:** `search_jira_issues(project_key: Optional[str] = None, assignee: Optional[str] = None, status: Optional[str] = None, issue_type: Optional[str] = None, max_results: int = 50) -> str`
 
-        OPERATION PLANNING GUIDELINES:
+            **When to use:**
+            - Search for JIRA issues with flexible filtering
+            - Find issues by assignee, project, status, or type
+            - Get recent issues across all projects
 
-        1. Date/Time Operations:
-           - Always use get_current_time first when dealing with relative dates
-           - Convert relative terms ("last week", "yesterday", "this month") to specific dates
-           - Use appropriate date formats for different tools
+            **Example:**
+            ```python
+            # Find all issues assigned to John
+            search_jira_issues(assignee="john.doe")
 
-        2. User Matching:
-           - Match user names across JIRA and GitHub (e.g., "joe.doe" ↔ "joe doe")
-           - Consider partial matches and common variations
-           - Use search tools to validate user existence
+            # Find all bugs across all projects
+            search_jira_issues(issue_type="Bug")
 
-        3. Repository/Project Context:
-           - Map project names to repository names when possible
-           - Consider organizational structure and naming conventions
-           - Use discovery tools when specific names aren't clear
+            # Find in-progress issues in specific project
+            search_jira_issues(project_key="PROJ", status="In Progress")
 
-        4. Multi-step Operations:
-           - Break complex queries into logical steps
-           - Plan data gathering before analysis
-           - Consider dependencies between operations
+            # Get recent issues (no filters)
+            search_jira_issues()
+            ```
 
-        5. Error Handling:
-           - Plan for connection testing when issues arise
-           - Include fallback operations for missing data
-           - Validate user/project existence before detailed queries
+            ### 2. `get_jira_projects`
+            **Signature:** `get_jira_projects() -> str`
+
+            **When to use:**
+            - List all available JIRA projects
+            - Find project keys for other searches
+            - Get project information and leads
+
+            **Example:**
+            ```python
+            # Get all projects
+            get_jira_projects()
+            ```
+
+            ### 3. `get_jira_project_users`
+            **Signature:** `get_jira_project_users(project_key: str, max_results: int = 50) -> str`
+
+            **When to use:**
+            - Find assignable users for a specific project
+            - Get team members for a project
+            - Find valid assignee names
+
+            **Example:**
+            ```python
+            # Get users for PROJ project
+            get_jira_project_users(project_key="PROJ")
+
+            # Get users with custom limit
+            get_jira_project_users(project_key="API-BACKEND", max_results=100)
+            ```
+
+            ### 4. `search_jira_users`
+            **Signature:** `search_jira_users(query: str, max_results: int = 20) -> str`
+
+            **When to use:**
+            - Find users by partial name or email
+            - Look up team members across all JIRA
+            - Find correct assignee format
+
+            **Example:**
+            ```python
+            # Search for user by partial name
+            search_jira_users(query="john")
+
+            # Search by email
+            search_jira_users(query="john@company.com")
+
+            # Search with custom limit
+            search_jira_users(query="sarah", max_results=50)
+            ```
+
+            ### 5. `get_jira_issue_details`
+            **Signature:** `get_jira_issue_details(issue_key: str) -> str`
+
+            **When to use:**
+            - Get detailed information about specific issues
+            - View issue descriptions and comments
+            - Check issue status and transitions
+
+            **Example:**
+            ```python
+            # Get details for specific issue
+            get_jira_issue_details(issue_key="PROJ-123")
+
+            # Get details for API issue
+            get_jira_issue_details(issue_key="API-456")
+            ```
+
+
+
+            ## GitHub Tools
+
+            ### 1. `get_github_commits`
+            **Signature:** `get_github_commits(repositories: Optional[List[str]] = None, author: Optional[str] = None, since_days: int = 7, branch: Optional[str] = None, limit: int = 100) -> str`
+
+            **When to use:**
+            - Get commits with flexible filtering
+            - Track commit activity by author or repository
+            - Monitor code changes over time periods
+
+            **Example:**
+            ```python
+            # Get commits by specific author
+            get_github_commits(author="john")
+
+            # Get commits from specific repository
+            get_github_commits(repositories=["my-app"])
+
+            # Get commits from last month
+            get_github_commits(since_days=30)
+
+            # Get commits from specific branch
+            get_github_commits(branch="develop", since_days=7)
+            ```
+
+            ### 2. `get_github_repositories`
+            **Signature:** `get_github_repositories() -> str`
+
+            **When to use:**
+            - List all repositories with contributors
+            - Get repository metadata and team information
+            - Find repository names for other operations
+
+            **Example:**
+            ```python
+            # Get all repositories
+            get_github_repositories()
+            ```
+
+            ### 3. `get_github_repository_details`
+            **Signature:** `get_github_repository_details(repository: str) -> str`
+
+            **When to use:**
+            - Get comprehensive repository information
+            - View contributors, releases, branches
+            - Get repository statistics and languages
+
+            **Example:**
+            ```python
+            # Get details for specific repository
+            get_github_repository_details(repository="frontend")
+
+            # Get details for backend project
+            get_github_repository_details(repository="my-app")
+            ```
+
+            ### 4. `get_github_pull_requests`
+            **Signature:** `get_github_pull_requests(repositories: Optional[List[str]] = None, author: Optional[str] = None, since_days: int = 7, state: str = "all", limit: int = 100) -> str`
+
+            **When to use:**
+            - Track pull request activity
+            - Monitor PR status and authors
+            - Get PR information for specific repositories
+
+            **Example:**
+            ```python
+            # Get recent pull requests
+            get_github_pull_requests()
+
+            # Get PRs by specific author
+            get_github_pull_requests(author="john")
+
+            # Get open PRs only
+            get_github_pull_requests(state="open")
+
+            # Get PRs from specific repositories
+            get_github_pull_requests(repositories=["frontend", "backend"])
+            ```
+
+            ### 5. `get_github_recent_activities`
+            **Signature:** `get_github_recent_activities(usernames: List[str], days: int = 7, include_commits: bool = True, include_prs: bool = True, repositories: Optional[List[str]] = None) -> str`
+
+            **When to use:**
+            - Track comprehensive user activity
+            - Monitor team activity over time
+            - Get detailed activity analytics
+
+            **Example:**
+            ```python
+            # Get activity for specific users
+            get_github_recent_activities(usernames=["john.doe", "jane.smith"])
+
+            # Get activity for last month
+            get_github_recent_activities(usernames=["john"], days=30)
+
+            # Get only commits (no PRs)
+            get_github_recent_activities(usernames=["john"], include_prs=False)
+
+            # Get activity for specific repositories
+            get_github_recent_activities(usernames=["john"], repositories=["my-app"])
+            ```
         """
 
-    def _create_agent_prompt(self) -> ChatPromptTemplate:
+    def _create_system_prompt(self) -> str:
         """
-        Create the agent prompt template for intent parsing and operation planning.
+        Create the system prompt for intent parsing.
         """
-        system_prompt = f"""
-        You are an intelligent Technical Program Manager Agent specializing in development workflow analysis.
-        Your role is to understand user queries about JIRA and GitHub activities, then create comprehensive 
-        execution plans for the downstream basic agent.
+        # Get context information
+        jira_context = str(self.jira_client.context) if self._cached_context["jira"] is None else self._cached_context["jira"]
+        github_context = str(self.github_client.context) if self._cached_context["github"] is None else self._cached_context["github"]
 
-        CORE RESPONSIBILITIES:
-        1. Determine if the user query is relevant to development/project management
-        2. Based on the query try to find the matching user, project and repository information from the context information.
-        3. Create detailed operation plan for the relevant query using tools and context information.
-    
+        self._cached_context["jira"] = jira_context
+        self._cached_context["github"] = github_context
 
-        CONTEXT INFORMATION:
-        The agent has access to context information about JIRA projects and GitHub repositories.
-        Use the available tools to discover and match users, projects, and repositories dynamically.
-
-        AVAILABLE TOOLS AND CAPABILITIES:
-        {self._get_tool_capabilities()}
-
-        OPERATION PLANNING PROCESS:
-        1. First, assess query relevance to JIRA/GitHub development activities
-        2. If relevant, use get_current_time tool when dealing with relative dates
-        3. Plan a sequence of operations to fully answer the user's question
-        4. Consider user name variations and matching across platforms
-        5. Structure the response according to IntentParserResponse schema
-
-        OPERATION PLANNING EXAMPLES WITH CROSS-PLATFORM MATCHING:
-
-        Example 1: "What did John work on last week?"
-        Strategy:
-        1. Use get_current_time to calculate "last week" date range
-        2. Use search_jira_users with MULTIPLE searches: "john", "john doe", "j.doe" to find variations
-        3. Use search_jira_issues with assignee filter for John's JIRA work
-        4. Use get_github_recent_activities with usernames like ["john-doe", "johnsmith", "j-doe"] for GitHub activity
-        5. Cross-reference by timeframe and project context
+        tool_capabilities = self._get_tool_capabilities()
         
-        IMPORTANT: For better matching, use PARTIAL NAME SEARCHES:
-        - Instead of "abhiyan timilsina", try "abhiyan" AND "timilsina" separately
-        - Search both first name and last name individually
-        - This increases chances of finding the user even with different name formats
+        return f"""You are an expert intent parser in project management domain whose job is to take the user input and convert it into a step by step procedure to complete the query.
 
-        Example 2: "Show me activity in the authentication service"
-        Strategy:
-        1. Use get_jira_projects to identify auth-related projects (AUTH, USER-SERVICE)
-        2. Use get_github_repositories to find auth-related repos (user-auth-service, authentication-api)
-        3. Use search_jira_issues with project_key filter for JIRA activity
-        4. Use get_github_commits and get_github_pull_requests for GitHub activity
-        5. Map projects to repositories in context
+            Your have context of integrations and their available tools signature and you job is to generate a JSON in a given structure to complete the user query. 
 
-        Example 3: "What has Sarah worked on in frontend?"
-        Strategy:
-        1. Use search_jira_users to find Sarah's JIRA identity (sarah.smith@company.com)
-        2. Identify frontend projects (FRONTEND, UI-COMPONENTS) and repos (frontend-app, ui-components)
-        3. Use search_jira_issues with assignee and project filters
-        4. Use get_github_recent_activities with usernames ["sarah-smith", "sarahj"] and repository filters
-        5. Include user matching confidence in context
+            For now you will have access to two tools Jira and Github. Jira is a popular project management tool which is used to track the project progress, tasks, assignees and lifecycle. Github is a version control platform that uses git to store code.
 
-        COMPREHENSIVE MATCHING PATTERNS:
+            You first need to determine the query is valid or not. We only entertain queries which are related to project management and these tools.
+
+            For a valid query we need to determine the following keys:
+
+            1. assignee: A list of project team member names or team names for which the query is asked.We need to find the correct assignee name for the query. We you have context on the project members for JIRA and Github separately. Based on the query we need to find the correct assignee name for the query. We have contributors information for github and users for jira. We need to take
+            displayName from username in JIRA and username from contributors for github. For each assignee we need to find the correct name and add it to the list.
+
+            2. projects: A list of project for which the question is asked. If no specific project is there we need to find the correct project name for the query. We have project information for JIRA and repositories for github. We need to take project key from project information and name from repositories. For each project we need to find the correct name and add it to the list.
+
+            2. time_range: A string representation of the time range for which the question is asked. Like today, last week, this week.
+
+            4. operations: A list of operations that needs to be done step by step to complete the user query. This should have description of the tool call what to do. This should be a plain english description of the tool call. If the multiple steps require input
+            from previous steps, you should mention that correctly. This is the cruicial step.
+
+            Here is the context of the projects and repositories which we are having access to:
+
+            # JIRA Projects
+            {jira_context}
+
+            # Github Repositories
+            {github_context}
+
+            Here is the description of the tools which we are having access to:
+            {tool_capabilities}
+
+            ## Examples
+
+            Here are some examples of the user queries and the expected output:
+
+            User Query: What did John work on last week?
+
+            Expected Output:
+            {{
+            "is_relevant": true,
+            "intent": "Find recent activities for John",
+            "operations": [
+                {{
+                    "tool": "get_recent_activity",
+                    "action": "Get activity for John across JIRA and GitHub",
+                    "filters": {{"team_members": ["john", "john.doe"], "days": 7}},
+                    "output_keys": ["jira_activity", "github_activity"]
+                }}
+            ],
+            "members": ["john", "john.doe"],
+            "projects": [],
+            "repositories": [],
+            "time_range": {{"start": null, "end": null, "label": "last week"}},
+            "context": {{"user_matching": "john -> john, john.doe", "notes": "Cross-platform activity search"}},
+            "error": null
+            }}
+
+            Explanation:
+            Here we have used cross platform tool which we will be using to get the recent activity for the user john and john.doe.
+            Adding both names is important because we have different names for the same user in Jira and Github.
+
+            User Query: What all commits has been done by john this week
+
+            {{
+            "is_relevant": true,
+            "intent": "Get GitHub commits by John for this week",
+            "operations": [
+                {{
+                    "tool": "get_github_commits",
+                    "action": "Retrieve commits by john.doe",
+                    "filters": {{"author": "john.doe", "since_days": 7}},
+                    "output_keys": ["commits"]
+                }}
+            ],
+            "members": ["john.doe"],
+            "projects": [],
+            "repositories": [],
+            "time_range": {{"start": null, "end": null, "label": "this week"}},
+            "context": {{"user_matching": "john -> john.doe", "notes": "GitHub-specific query"}},
+            "error": null
+            }}
+
+            Explanation:
+            Here we have used github commits tool to get the commits for the user john.doe.
+            We have not added jira commits because we have not found the user john.doe in jira.
+
+            User Query: Show me recent activity for john
+
+            {{
+            "is_relevant": true,
+            "intent": "Get recent activity for John",
+            "operations": [
+                {{
+                    "tool": "get_recent_activity",
+                    "action": "Get activity for john across platforms",
+                    "filters": {{"team_members": ["john.doe", "john"], "days": 7}},
+                    "output_keys": ["jira_activity", "github_activity"]
+                }}
+            ],
+            "members": ["john.doe", "john"],
+            "projects": [],
+            "repositories": [],
+            "time_range": {{"start": null, "end": null, "label": "last 7 days"}},
+            "context": {{"user_matching": "john -> john.doe, john", "notes": "Cross-platform activity search"}},
+            "error": null
+            }}
+
+            User Query: Give me a list of tasks assigned to john on JIRA
+
+            {{
+            "is_relevant": true,
+            "intent": "Get JIRA issues assigned to John",
+            "operations": [
+                {{
+                    "tool": "search_jira_issues",
+                    "action": "Search issues assigned to john",
+                    "filters": {{"assignee": "john"}},
+                    "output_keys": ["issues"]
+                }}
+            ],
+            "members": ["john"],
+            "projects": [],
+            "repositories": [],
+            "time_range": {{"start": null, "end": null, "label": "all time"}},
+            "context": {{"user_matching": "john -> john", "notes": "JIRA-specific query"}},
+            "error": null
+            }}
+
+            User Query: What's the weather like today?
+
+            {{
+            "is_relevant": false,
+            "intent": null,
+            "operations": [],
+            "members": [],
+            "projects": [],
+            "repositories": [],
+            "time_range": null,
+            "context": null,
+            "error": {{"error": "Query not relevant", "reasoning": "Not related to JIRA or GitHub activities"}}
+            }}
+
+            Return ONLY a valid JSON object. Do not include any text before or after the JSON."""
+
+    async def parse_intent(self, query: str, chat_history: List[Dict[str, str]]) -> str:
+        """
+        Parse user query and return raw LLM response.
+        """
+        # Get current time for context
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
-        CRITICAL USER NAME EXTRACTION AND MATCHING RULES:
+        # Create system and human messages
+        system_message = SystemMessage(content=self._create_system_prompt())
+        
+        human_content = f"""Current Time: {current_time}
 
-        1. EXTRACT USERS FROM QUERY: Always identify and list users mentioned in the query
-           - "abhiyan timilsina" → members: ["abhiyan timilsina", "abhiyan.timilsina", "abhiyantimilsina"]
-           - "john doe" → members: ["john doe", "john.doe", "johndoe", "j.doe"]
-           - "sarah" → members: ["sarah", "sarah.smith", "sarahsmith", "s.smith"]
+        Chat History: {str(chat_history)}
 
-        2. JIRA USERNAME PATTERNS:
-           - Full name: "abhiyan timilsina" → "abhiyan.timilsina@company.com"
-           - Email format: "firstname.lastname@domain.com"
-           - Display name: "Abhiyan Timilsina" (exact case)
-           - Username: "abhiyan.timilsina", "atimilsina"
+        User Query: {query}
 
-        3. GITHUB USERNAME PATTERNS:
-           - Hyphenated: "abhiyan-timilsina"
-           - Concatenated: "abhiyantimilsina"  
-           - Abbreviated: "atimilsina", "abhiyan52"
-           - Underscored: "abhiyan_timilsina"
-
-        4. MATCHING STRATEGY:
-           - ALWAYS populate members field with all possible username variations
-           - Use search_jira_users with partial names: "abhiyan", "timilsina"
-           - Include common variations in GitHub usernames list
-           - Cross-reference found users between platforms
-
-        REPOSITORY/PROJECT MATCHING PATTERNS:
-        - "frontend" → JIRA: "FRONTEND", "UI-COMPONENTS" → GitHub: "frontend-app", "ui-components"
-        - "backend" → JIRA: "BACKEND-API", "SERVICES" → GitHub: "backend-api", "microservices"  
-        - "authentication" → JIRA: "AUTH", "USER-SERVICE" → GitHub: "user-auth-service", "auth-api"
-        - "database" → JIRA: "DATABASE", "DATA" → GitHub: "database-service", "data-layer"
-        - "mobile" → JIRA: "MOBILE-APP", "IOS", "ANDROID" → GitHub: "mobile-app", "ios-client", "android-app"
-
-        IMPORTANT: You have access to the get_current_time tool. Use it whenever you need to:
-        - Convert relative dates ("last week", "yesterday", "this month")
-        - Calculate date ranges for filtering
-        - Understand current context for time-based queries
-
-        Respond with a structured IntentParserResponse that includes:
-        - is_relevant: boolean indicating if query is development-related
-        - agent_intent: detailed operation plan if relevant
-        - error: error information if query is irrelevant or problematic
-        """
-
-        return ChatPromptTemplate.from_messages([
-            ("system", system_prompt),
-            ("human", """
-            Chat History: {chat_history}
-            
-            User Query: {input}
-            
-            Please analyze this query and create a comprehensive execution plan. Use the get_current_time tool 
-            if you need current date/time context for relative date references.
-            
-            IMPORTANT: Respond with a valid JSON object following the IntentParserResponse schema.
-            
-            For relevant queries, use this EXACT structure:
-            {{
-                "is_relevant": true,
-                "agent_intent": {{
-                    "intent": "Clear description of what user wants",
-                    "operations": [
-                        {{
-                            "tool": "tool_name",
-                            "action": "Specific action description",
-                            "filters": {{"param1": "value1", "param2": "value2"}},
-                            "output_keys": ["key1", "key2"]
-                        }}
-                    ],
-                    "members": ["list_all_identified_users_from_query"],
-                    "projects": ["jira_project_keys"],
-                    "repositories": ["github_repo_names"],
-                    "time_range": {{"start": null, "end": null, "label": "description"}},
-                    "context": {{
-                        "user_matching": "strategy used",
-                        "project_mapping": "how projects were mapped",
-                        "notes": "additional context"
-                    }}
-                }},
-                "error": null
-            }}
-            
-            For irrelevant queries:
-            {{
-                "is_relevant": false,
-                "agent_intent": null,
-                "error": {{"error": "reason", "reasoning": "detailed explanation"}}
-            }}
-            """),
-            ("placeholder", "{agent_scratchpad}")
-        ])
-
-    async def parse_intent(
-        self, query: str, chat_history: List[Dict[str, str]]
-    ) -> Union[AgentIntent, IrrelevantQueryError]:
-        """
-        Parse user query using the agent to create comprehensive execution plans.
-        """
-        try:
-            # Use the agent to process the query with access to datetime tool
-            response = await self.agent_executor.ainvoke({
-                "input": query,
-                "chat_history": str(chat_history)
-            })
-            
-            # Extract the agent's output
-            agent_output = response.get("output", "")
-            
-            # Try to parse the agent's response as JSON
-            try:
-                # Look for JSON in the agent's response
-                if "{" in agent_output and "}" in agent_output:
-                    start_idx = agent_output.find("{")
-                    end_idx = agent_output.rfind("}") + 1
-                    json_str = agent_output[start_idx:end_idx]
-                    
-                    parsed_response = json.loads(json_str)
-                    
-                    # Convert to IntentParserResponse
-                    intent_response = IntentParserResponse(**parsed_response)
-                    
-                    # Return appropriate response
-                    if intent_response.is_relevant and intent_response.agent_intent:
-                        return intent_response.agent_intent
-                    elif intent_response.error:
-                        return intent_response.error
-                    else:
-                        return IrrelevantQueryError(
-                            error="Query is not relevant to JIRA or GitHub activity.",
-                            reasoning="Agent determined query is not development-related."
-                        )
-                        
-            except (json.JSONDecodeError, Exception) as parse_error:
-                print(f"Failed to parse agent response: {parse_error}")
-                print(f"Agent output: {agent_output}")
-                
-                # Fallback: analyze if query seems relevant
-                query_lower = query.lower()
-                relevant_keywords = [
-                    'jira', 'github', 'issue', 'ticket', 'commit', 'pull request', 'pr',
-                    'bug', 'story', 'task', 'repository', 'repo', 'project', 'assigned',
-                    'worked on', 'activity', 'progress', 'merge', 'branch', 'code',
-                    'development', 'dev', 'feature', 'fix', 'implementation'
-                ]
-                
-                is_relevant = any(keyword in query_lower for keyword in relevant_keywords)
-                
-                if not is_relevant:
-                    return IrrelevantQueryError(
-                        error="Query is not relevant to JIRA or GitHub activity.",
-                        reasoning="Query does not contain development-related keywords."
-                    )
-                else:
-                    # Create a basic intent if we can't parse the agent response
-                    return AgentIntent(
-                        intent=f"Process query: {query}",
-                        operations=[],
-                        context=f"Agent response parsing failed. Raw output: {agent_output[:200]}..."
-                    )
-                    
-        except Exception as e:
-            print(f"Error in agent execution: {e}")
-            return IrrelevantQueryError(
-                error="Failed to process query.",
-                reasoning=f"Agent execution error: {str(e)}"
-            )
+        Please analyze this query and return the JSON response."""
+        
+        human_message = HumanMessage(content=human_content)
+        
+        # Call LLM directly
+        response = await self.llm.ainvoke([system_message, human_message])
+        
+        # Return raw content
+        return response.content if hasattr(response, 'content') else str(response)
