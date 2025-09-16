@@ -1,12 +1,12 @@
 from typing import Optional, Dict, Any, List
 import json
-from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.agents import initialize_agent, AgentType
 from langchain.memory import ConversationBufferMemory
 from langchain_core.messages import HumanMessage, AIMessage
 from app.core.config import settings
 from app.core.tools import tools
 from app.core.services.intent_parser import AgentIntentParser
+from app.llm.helpers import create_llm
 
 
 def clean_json_response(response_str: str) -> str:
@@ -147,10 +147,8 @@ class BasicAgent:
     async def _initialize(self):
         """Initialize LLM and agent."""
         if self.llm is None:
-            self.llm = ChatGoogleGenerativeAI(
-                model="gemini-1.5-flash",
-                google_api_key=settings.google_api_key,
-                model_kwargs={"system_instruction": self._get_simple_prompt()},
+            self.llm = create_llm(
+                system_instruction=self._get_simple_prompt(),
                 temperature=0
             )
         

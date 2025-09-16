@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     # Google Gemini Configuration
     google_api_key: Optional[str] = os.getenv("GOOGLE_API_KEY")
     
+    # LLM Provider Configuration
+    preferred_llm_provider: str = os.getenv("PREFERRED_LLM_PROVIDER", "GOOGLE")
+    
     # Application Settings
     debug: bool = False
     log_level: str = "INFO"
