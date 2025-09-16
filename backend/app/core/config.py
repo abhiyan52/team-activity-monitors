@@ -1,5 +1,5 @@
 from pydantic_settings import BaseSettings
-from typing import Optional
+from typing import Optional, List
 from dotenv import load_dotenv
 import os
 
@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     # GitHub Configuration
     github_token: Optional[str] = os.getenv("GITHUB_TOKEN")
     github_organization: Optional[str] = os.getenv("GITHUB_ORGANIZATION")
+    github_repo_names: Optional[str] = os.getenv("GITHUB_REPO_NAMES")
     
     # OpenAI Configuration (for chatbot responses)
     openai_api_key: Optional[str] = os.getenv("OPENAI_API_KEY")

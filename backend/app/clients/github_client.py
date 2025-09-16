@@ -1,9 +1,10 @@
 from github import Github
 from github.GithubException import GithubException
 from typing import List, Dict, Any, Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from app.core.config import settings
-from app.models.schemas import GitHubCommit, GitHubPullRequest, GitHubResponse, GitHubFilter
+from app.core.services.simple_cache import cached
+
 
 
 class GitHubClient:
@@ -11,371 +12,539 @@ class GitHubClient:
         self.token = settings.github_token
         self.organization = settings.github_organization
         self.github = None
-        
-        if self.token:
-            try:
-                self.github = Github(self.token)
-            except GithubException as e:
-                print(f"Failed to initialize GitHub client: {e}")
-                self.github = None
+        self.github_repositories = settings.github_repo_names.split(",") if settings.github_repo_names else None
+        self.github = Github(self.token)
     
     def _is_configured(self) -> bool:
         """Check if GitHub client is properly configured"""
         return bool(self.token and self.github)
     
-    def get_repositories(self) -> List[str]:
-        """Get list of repositories for the organization or user"""
+    def _get_repo_full_name(self, repository: str) -> str:
+        """Get full repository name (owner/repo)"""
+        if "/" in repository:
+            return repository
+        
+        if self.organization:
+            return f"{self.organization}/{repository}"
+        else:
+            user = self.github.get_user()
+            return f"{user.login}/{repository}"
+    
+    @cached(ttl=300)
+    def get_pull_requests(
+        self,
+        author: Optional[str] = None,
+        repositories: Optional[List[str]] = None,
+        state: str = "all",
+        since: Optional[datetime] = None,
+        until: Optional[datetime] = None,
+        limit: int = 100
+    ) -> List[Dict[str, Any]]:
+        """
+        Get all pull requests with flexible filtering options.
+        
+        Args:
+            author: Filter by PR author username
+            repository: Single repository name to search
+            repositories: List of repository names to search
+            state: PR state - "open", "closed", "all" (default: "all")
+            since: Get PRs updated after this date
+            until: Get PRs updated before this date
+            limit: Maximum number of PRs to return per repository (default: 100)
+        
+        Returns:
+            List of pull request dictionaries with detailed information
+        """
         if not self._is_configured():
             return []
         
-        try:
-            repos = []
-            if self.organization:
-                # Get repositories from organization
-                org = self.github.get_organization(self.organization)
-                for repo in org.get_repos():
-                    repos.append(repo.name)
-            else:
-                # Get repositories for authenticated user
-                for repo in self.github.get_user().get_repos():
-                    repos.append(repo.name)
-            
-            return repos
-            
-        except GithubException as e:
-            print(f"Error fetching repositories: {e}")
-            return []
-    
-    def get_repository_details(self) -> List[Dict[str, Any]]:
-        """Get detailed information about repositories"""
+        # Determine repositories to search
+        search_repos = []
+        if repositories:
+            search_repos = repositories
+        else:
+            # Get all accessible repositories
+            search_repos = self._get_all_repositories()
+        
+        all_prs = []
+
+        
+        for repo_name in search_repos:
+            try:
+                repo_full_name = self._get_repo_full_name(repo_name)
+                repo = self.github.get_repo(repo_full_name)
+                
+                # Get pull requests with state filter
+                prs = repo.get_pulls(state=state, sort='updated', direction='desc')
+                
+                pr_count = 0
+                for pr in prs:
+                    if pr_count >= limit:
+                        break
+                    
+                    # Filter by author
+                    if author and pr.user.login.lower() != author.lower():
+                        continue
+                    
+                    # Filter by date range
+                    if since:
+                        # Make since timezone-aware if it's not already
+                        since_aware = since.replace(tzinfo=timezone.utc) if since.tzinfo is None else since
+                        if pr.updated_at < since_aware:
+                            continue
+                    if until:
+                        # Make until timezone-aware if it's not already
+                        until_aware = until.replace(tzinfo=timezone.utc) if until.tzinfo is None else until
+                        if pr.updated_at > until_aware:
+                            continue
+                    
+                    pr_data = {
+                        "number": pr.number,
+                        "title": pr.title,
+                        "state": pr.state,
+                        "author": pr.user.login,
+                        "author_name": pr.user.name or pr.user.login,
+                        "created_at": pr.created_at.isoformat() if pr.created_at else None,
+                        "updated_at": pr.updated_at.isoformat() if pr.updated_at else None,
+                        "merged_at": pr.merged_at.isoformat() if pr.merged_at else None,
+                        "closed_at": pr.closed_at.isoformat() if pr.closed_at else None,
+                        "merged": pr.merged,
+                        "draft": pr.draft,
+                        "url": pr.html_url,
+                        "repository": repo_name,
+                        "repository_full_name": repo_full_name,
+                        "base_branch": pr.base.ref,
+                        "head_branch": pr.head.ref,
+                        "commits": pr.commits,
+                        "additions": pr.additions,
+                        "deletions": pr.deletions,
+                        "changed_files": pr.changed_files,
+                        "labels": [label.name for label in pr.labels],
+                        "assignees": [assignee.login for assignee in pr.assignees],
+                        "reviewers": [reviewer.login for reviewer in pr.requested_reviewers],
+                        "body": pr.body or ""
+                    }
+                    all_prs.append(pr_data)
+                    pr_count += 1
+                    
+            except GithubException as e:
+                print(f"Error fetching pull requests for {repo_name}: {e}")
+                continue
+
+        # Sort by updated date (most recent first)
+        return sorted(all_prs, key=lambda x: x['updated_at'] or '', reverse=True)
+
+    @cached(ttl=300)
+    def get_commits(
+        self,
+        author: Optional[str] = None,
+        repositories: Optional[List[str]] = None,
+        since: Optional[datetime] = None,
+        until: Optional[datetime] = None,
+        branch: Optional[str] = None,
+        limit: int = 100
+    ) -> List[Dict[str, Any]]:
+        """
+        Get all commits with flexible filtering options.
+        
+        Args:
+            author: Filter by commit author username or email
+            repository: Single repository name to search
+            repositories: List of repository names to search
+            since: Get commits after this date
+            until: Get commits before this date
+            branch: Branch name to search (default: default branch)
+            limit: Maximum number of commits to return per repository (default: 100)
+        
+        Returns:
+            List of commit dictionaries with detailed information
+        """
         if not self._is_configured():
             return []
         
-        try:
-            repos = []
-            if self.organization:
-                # Get repositories from organization
-                org = self.github.get_organization(self.organization)
-                repo_list = org.get_repos()
-            else:
-                # Get repositories for authenticated user
-                repo_list = self.github.get_user().get_repos()
-            
-            for repo in repo_list:
-                repos.append({
-                    "name": repo.name,
-                    "full_name": repo.full_name,
-                    "private": repo.private,
-                    "description": repo.description,
-                    "language": repo.language,
-                    "stars": repo.stargazers_count,
-                    "forks": repo.forks_count,
-                    "updated_at": repo.updated_at.isoformat() if repo.updated_at else None,
-                    "html_url": repo.html_url
-                })
-            
-            return repos
-            
-        except GithubException as e:
-            print(f"Error fetching repository details: {e}")
-            return []
-    
-    def get_commits(self, repositories: List[str], filters: GitHubFilter) -> List[GitHubCommit]:
-        """Get commits from specified repositories"""
-        if not self._is_configured():
-            return []
+        # Determine repositories to search
+        search_repos = []
+        if repositories:
+            search_repos = repositories
+        else:
+            # Get all accessible repositories
+            search_repos = self._get_all_repositories()
         
         all_commits = []
         
-        for repo_name in repositories:
+        for repo_name in search_repos:
             try:
-                # Get repository object
-                if self.organization:
-                    repo = self.github.get_repo(f"{self.organization}/{repo_name}")
-                else:
-                    user = self.github.get_user()
-                    repo = self.github.get_repo(f"{user.login}/{repo_name}")
+                repo_full_name = self._get_repo_full_name(repo_name)
+                repo = self.github.get_repo(repo_full_name)
                 
-                # Build parameters for commit query
+                # Build commit query parameters
                 kwargs = {}
-                
-                if filters.author:
-                    kwargs["author"] = filters.author
-                
-                if filters.since:
-                    kwargs["since"] = filters.since
-                
-                if filters.branch:
-                    kwargs["sha"] = filters.branch
+                if author:
+                    kwargs["author"] = author
+                if since:
+                    kwargs["since"] = since
+                if until:
+                    kwargs["until"] = until
+                if branch:
+                    kwargs["sha"] = branch
                 
                 # Get commits
                 commits = repo.get_commits(**kwargs)
                 
-                # Limit to avoid too many API calls
                 commit_count = 0
-                max_commits = 30
-                
                 for commit in commits:
-                    if commit_count >= max_commits:
+                    if commit_count >= limit:
                         break
                     
-                    github_commit = GitHubCommit(
-                        sha=commit.sha,
-                        message=commit.commit.message,
-                        author=commit.commit.author.name,
-                        date=commit.commit.author.date,
-                        url=commit.html_url,
-                        repository=repo_name
-                    )
-                    all_commits.append(github_commit)
+                    commit_data = {
+                        "message": commit.commit.message,
+                        "author": commit.commit.author.name,
+                        "author_email": commit.commit.author.email,
+                        "author_username": commit.author.login if commit.author else None,
+                        "committer": commit.commit.committer.name,
+                        "committer_email": commit.commit.committer.email,
+                        "date": commit.commit.author.date.isoformat() if commit.commit.author.date else None,
+                        "url": commit.html_url,
+                        "repository": repo_name,
+                        "repository_full_name": repo_full_name
+                    }
+                    all_commits.append(commit_data)
                     commit_count += 1
                     
             except GithubException as e:
                 print(f"Error fetching commits for {repo_name}: {e}")
                 continue
         
-        return sorted(all_commits, key=lambda x: x.date, reverse=True)
-    
-    def get_pull_requests(self, repositories: List[str], filters: GitHubFilter) -> List[GitHubPullRequest]:
-        """Get pull requests from specified repositories"""
+        # Sort by date (most recent first)
+        return sorted(all_commits, key=lambda x: x['date'] or '', reverse=True)
+
+    @cached(ttl=300)
+    def get_repositories_with_contributors(self) -> List[Dict[str, Any]]:
+        """
+        Get all accessible repositories along with their contributors.
+        
+        Returns:
+            List of repository dictionaries with contributor information
+        """
         if not self._is_configured():
             return []
         
-        all_prs = []
+        repositories = []
         
-        for repo_name in repositories:
-            try:
-                # Get repository object
-                if self.organization:
-                    repo = self.github.get_repo(f"{self.organization}/{repo_name}")
-                else:
-                    user = self.github.get_user()
-                    repo = self.github.get_repo(f"{user.login}/{repo_name}")
-                
-                # Get pull requests
-                prs = repo.get_pulls(state='all', sort='updated', direction='desc')
-                
-                # Limit to avoid too many API calls
-                pr_count = 0
-                max_prs = 30
-                
-                for pr in prs:
-                    if pr_count >= max_prs:
-                        break
-                    
-                    # Filter by author if specified
-                    if filters.author and pr.user.login != filters.author:
+        try:
+            # Get repositories
+            if self.organization:
+                org = self.github.get_organization(self.organization)
+                repo_list = org.get_repos()
+            else:
+                repo_list = self.github.get_user().get_repos()
+
+            
+            for repo in repo_list:
+                try:
+                    if self.github_repositories and self._get_repo_full_name(repo.name) not in self.github_repositories:
                         continue
+
+                    # Get contributors
+                    contributors = []
+                    for contributor in repo.get_contributors():
+
+                        contributors.append({
+                            "name": contributor.name or contributor.login,
+                            "contributions": contributor.contributions,
+                            "username": contributor.login
+                        })
                     
-                    # Filter by date if specified
-                    if filters.since:
-                        # Ensure both datetimes are timezone-aware for comparison
-                        pr_updated = pr.updated_at
-                        if pr_updated.tzinfo is None:
-                            pr_updated = pr_updated.replace(tzinfo=filters.since.tzinfo)
-                        elif filters.since.tzinfo is None:
-                            filters_since = filters.since.replace(tzinfo=pr_updated.tzinfo)
-                        else:
-                            filters_since = filters.since
-                        
-                        if pr_updated < filters_since:
-                            continue
+                    # Get repository languages
+                    languages = {}
+                    try:
+                        languages = repo.get_languages()
+                    except GithubException:
+                        pass
+
                     
-                    github_pr = GitHubPullRequest(
-                        number=pr.number,
-                        title=pr.title,
-                        state=pr.state,
-                        author=pr.user.login,
-                        created_at=pr.created_at,
-                        updated_at=pr.updated_at,
-                        url=pr.html_url,
-                        repository=repo_name,
-                        merged=pr.merged,
-                        merged_at=pr.merged_at
-                    )
-                    all_prs.append(github_pr)
-                    pr_count += 1
+                    repo_data = {
+                        "name": repo.name,
+                        "full_name": repo.full_name,
+                        "description": repo.description,
+                        "private": repo.private,
+                        "fork": repo.fork,
+                        "language": repo.language,
+                        "languages": languages,
+                        "stars": repo.stargazers_count,
+                        "forks": repo.forks_count,
+                        "watchers": repo.watchers_count,
+                        "size": repo.size,
+                        "open_issues": repo.open_issues_count,
+                        "default_branch": repo.default_branch,
+                        "created_at": repo.created_at.isoformat() if repo.created_at else None,
+                        "updated_at": repo.updated_at.isoformat() if repo.updated_at else None,
+                        "pushed_at": repo.pushed_at.isoformat() if repo.pushed_at else None,
+                        "contributors": contributors,
+                        "contributor_count": len(contributors)
+                    }
+                    repositories.append(repo_data)
                     
-            except GithubException as e:
-                print(f"Error fetching pull requests for {repo_name}: {e}")
-                continue
+                except GithubException as e:
+                    print(f"Error processing repository {repo.name}: {e}")
+                    continue
+                    
+        except GithubException as e:
+            print(f"Error fetching repositories: {e}")
+            return []
+
         
-        return sorted(all_prs, key=lambda x: x.updated_at, reverse=True)
-    
-    def get_recent_activity(self, days: int = 7, team_members: Optional[List[str]] = None, repositories: Optional[List[str]] = None) -> GitHubResponse:
-        """Get recent GitHub activity"""
-        if not repositories:
-            repositories = self.get_repositories()
+        return sorted(repositories, key=lambda x: x['updated_at'] or '', reverse=True)
+
+
+    def get_repository_details(self, repository: str) -> Optional[Dict[str, Any]]:
+        """
+        Get detailed information about a specific repository.
         
-        filters = GitHubFilter(since=datetime.now() - timedelta(days=days))
+        Args:
+            repository: Repository name (can be just name or owner/name)
         
-        all_commits = []
-        all_prs = []
-        
-        if team_members:
-            for member in team_members:
-                member_filters = GitHubFilter(
-                    author=member,
-                    since=filters.since
-                )
-                member_commits = self.get_commits(repositories, member_filters)
-                member_prs = self.get_pull_requests(repositories, member_filters)
-                all_commits.extend(member_commits)
-                all_prs.extend(member_prs)
-        else:
-            all_commits = self.get_commits(repositories, filters)
-            all_prs = self.get_pull_requests(repositories, filters)
-        
-        return GitHubResponse(
-            commits=all_commits,
-            pull_requests=all_prs,
-            repositories=repositories
-        )
-    
-    def get_user_info(self, username: Optional[str] = None) -> Optional[Dict[str, Any]]:
-        """Get information about a GitHub user"""
+        Returns:
+            Dictionary with detailed repository information
+        """
         if not self._is_configured():
             return None
         
         try:
-            if username:
-                user = self.github.get_user(username)
-            else:
-                user = self.github.get_user()
+            repo_full_name = self._get_repo_full_name(repository)
+            repo = self.github.get_repo(repo_full_name)
+            
+            # Get contributors
+            contributors = []
+            try:
+                for contributor in repo.get_contributors():
+                    contributors.append({
+                        "login": contributor.login,
+                        "name": contributor.name or contributor.login,
+                        "avatar_url": contributor.avatar_url,
+                        "contributions": contributor.contributions,
+                        "html_url": contributor.html_url,
+                        "type": contributor.type
+                    })
+            except GithubException:
+                pass
+            
+            # Get languages
+            languages = {}
+            try:
+                languages = repo.get_languages()
+            except GithubException:
+                pass
+            
+            # Get recent releases
+            releases = []
+            try:
+                for release in repo.get_releases()[:5]:  # Get last 5 releases
+                    releases.append({
+                        "tag_name": release.tag_name,
+                        "name": release.title,
+                        "published_at": release.published_at.isoformat() if release.published_at else None,
+                        "html_url": release.html_url,
+                        "prerelease": release.prerelease,
+                        "draft": release.draft
+                    })
+            except GithubException:
+                pass
+            
+            # Get branches
+            branches = []
+            try:
+                for branch in repo.get_branches():
+                    branches.append({
+                        "name": branch.name,
+                        "protected": branch.protected,
+                        "commit_sha": branch.commit.sha
+                    })
+            except GithubException:
+                pass
             
             return {
-                "login": user.login,
-                "name": user.name,
-                "email": user.email,
-                "avatar_url": user.avatar_url,
-                "bio": user.bio,
-                "company": user.company,
-                "location": user.location,
-                "public_repos": user.public_repos,
-                "followers": user.followers,
-                "following": user.following,
-                "created_at": user.created_at.isoformat() if user.created_at else None,
-                "html_url": user.html_url
+                "name": repo.name,
+                "full_name": repo.full_name,
+                "description": repo.description,
+                "private": repo.private,
+                "fork": repo.fork,
+                "archived": repo.archived,
+                "disabled": repo.disabled,
+                "language": repo.language,
+                "languages": languages,
+                "stars": repo.stargazers_count,
+                "forks": repo.forks_count,
+                "watchers": repo.watchers_count,
+                "size": repo.size,
+                "open_issues": repo.open_issues_count,
+                "default_branch": repo.default_branch,
+                "has_issues": repo.has_issues,
+                "has_projects": repo.has_projects,
+                "has_wiki": repo.has_wiki,
+                "has_pages": repo.has_pages,
+                "has_downloads": repo.has_downloads,
+                "created_at": repo.created_at.isoformat() if repo.created_at else None,
+                "updated_at": repo.updated_at.isoformat() if repo.updated_at else None,
+                "pushed_at": repo.pushed_at.isoformat() if repo.pushed_at else None,
+                "html_url": repo.html_url,
+                "clone_url": repo.clone_url,
+                "ssh_url": repo.ssh_url,
+                "homepage": repo.homepage,
+                "topics": repo.get_topics(),
+                "license": repo.license.name if repo.license else None,
+                "contributors": contributors,
+                "contributor_count": len(contributors),
+                "releases": releases,
+                "branches": branches,
+                "branch_count": len(branches)
             }
             
         except GithubException as e:
-            print(f"Error fetching user info: {e}")
+            print(f"Error fetching repository details for {repository}: {e}")
             return None
     
-    def get_user_organizations(self, username: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Get organizations for a user"""
-        if not self._is_configured():
-            return []
+    @cached(ttl=300)
+    def get_recent_activities(
+        self,
+        usernames: List[str],
+        days: int = 7,
+        include_commits: bool = True,
+        include_prs: bool = True,
+        repositories: Optional[List[str]] = None
+    ) -> Dict[str, Any]:
+        """
+        Get recent activities for specified users.
         
-        try:
-            if username:
-                user = self.github.get_user(username)
-            else:
-                user = self.github.get_user()
-            
-            orgs = []
-            for org in user.get_orgs():
-                orgs.append({
-                    "login": org.login,
-                    "name": org.name,
-                    "description": org.description,
-                    "avatar_url": org.avatar_url,
-                    "html_url": org.html_url
-                })
-            
-            return orgs
-            
-        except GithubException as e:
-            print(f"Error fetching user organizations: {e}")
-            return []
-    
-    def get_repository_contributors(self, repository: str) -> List[Dict[str, Any]]:
-        """Get contributors for a repository"""
-        if not self._is_configured():
-            return []
+        Args:
+            usernames: List of GitHub usernames to get activities for
+            days: Number of days to look back (default: 7)
+            include_commits: Whether to include commit activities (default: True)
+            include_prs: Whether to include PR activities (default: True)
+            repositories: Optional list of repositories to limit search
         
-        try:
-            # Get repository object
-            if self.organization:
-                repo = self.github.get_repo(f"{self.organization}/{repository}")
-            else:
-                user = self.github.get_user()
-                repo = self.github.get_repo(f"{user.login}/{repository}")
-            
-            contributors = []
-            for contrib in repo.get_contributors():
-                contributors.append({
-                    "login": contrib.login,
-                    "name": contrib.name,
-                    "avatar_url": contrib.avatar_url,
-                    "contributions": contrib.contributions,
-                    "html_url": contrib.html_url
-                })
-            
-            return contributors
-            
-        except GithubException as e:
-            print(f"Error fetching repository contributors: {e}")
-            return []
-    
-    def get_repository_issues(self, repository: str, creator: Optional[str] = None, state: str = "all") -> List[Dict[str, Any]]:
-        """Get issues for a repository"""
+        Returns:
+            Dictionary with user activities and summary statistics
+        """
         if not self._is_configured():
-            return []
+            return {}
         
-        try:
-            # Get repository object
-            if self.organization:
-                repo = self.github.get_repo(f"{self.organization}/{repository}")
-            else:
-                user = self.github.get_user()
-                repo = self.github.get_repo(f"{user.login}/{repository}")
+        since_date = datetime.now(timezone.utc) - timedelta(days=days)
+        activities = {
+            "period": {
+                "days": days,
+                "since": since_date.isoformat(),
+                "until": datetime.now(timezone.utc).isoformat()
+            },
+            "users": {},
+            "summary": {
+                "total_commits": 0,
+                "total_prs": 0,
+                "total_repositories": 0,
+                "most_active_user": None,
+                "most_active_repository": None
+            }
+        }
+        
+        repo_activity = {}
+        
+        for username in usernames:
+            user_activities = {
+                "username": username,
+                "commits": [],
+                "pull_requests": [],
+                "commit_count": 0,
+                "pr_count": 0,
+                "repositories_contributed": set()
+            }
             
-            kwargs = {"state": state}
-            if creator:
-                kwargs["creator"] = creator
-            
-            issues = []
-            issue_count = 0
-            max_issues = 50
-            
-            for issue in repo.get_issues(**kwargs):
-                if issue_count >= max_issues:
-                    break
+            # Get commits
+            if include_commits:
+                commits = self.get_commits(
+                    author=username,
+                    repositories=repositories,
+                    since=since_date,
+                    limit=200
+                )
+                user_activities["commits"] = commits
+                user_activities["commit_count"] = len(commits)
                 
-                # Skip pull requests (they appear as issues in GitHub API)
-                if issue.pull_request:
-                    continue
+                for commit in commits:
+                    user_activities["repositories_contributed"].add(commit["repository"])
+                    repo_activity[commit["repository"]] = repo_activity.get(commit["repository"], 0) + 1
+            
+            # Get pull requests
+            if include_prs:
+                prs = self.get_pull_requests(
+                    author=username,
+                    repositories=repositories,
+                    since=since_date,
+                    limit=100
+                )
+                user_activities["pull_requests"] = prs
+                user_activities["pr_count"] = len(prs)
                 
-                issues.append({
-                    "number": issue.number,
-                    "title": issue.title,
-                    "state": issue.state,
-                    "author": issue.user.login,
-                    "created_at": issue.created_at.isoformat(),
-                    "updated_at": issue.updated_at.isoformat(),
-                    "body": issue.body,
-                    "labels": [label.name for label in issue.labels],
-                    "html_url": issue.html_url
-                })
-                issue_count += 1
+                for pr in prs:
+                    user_activities["repositories_contributed"].add(pr["repository"])
+                    repo_activity[pr["repository"]] = repo_activity.get(pr["repository"], 0) + 1
             
-            return issues
+            # Convert set to list for JSON serialization
+            user_activities["repositories_contributed"] = list(user_activities["repositories_contributed"])
+            user_activities["repository_count"] = len(user_activities["repositories_contributed"])
             
-        except GithubException as e:
-            print(f"Error fetching repository issues: {e}")
-            return []
-    
-    def _get_authenticated_user(self) -> str:
-        """Get the username of the authenticated user"""
-        if not self._is_configured():
-            return "unknown"
+            activities["users"][username] = user_activities
+            
+            # Update summary
+            activities["summary"]["total_commits"] += user_activities["commit_count"]
+            activities["summary"]["total_prs"] += user_activities["pr_count"]
         
+        # Calculate summary statistics
+        activities["summary"]["total_repositories"] = len(repo_activity)
+        
+        if activities["users"]:
+            # Find most active user
+            most_active = max(
+                activities["users"].items(),
+                key=lambda x: x[1]["commit_count"] + x[1]["pr_count"]
+            )
+            activities["summary"]["most_active_user"] = {
+                "username": most_active[0],
+                "total_activities": most_active[1]["commit_count"] + most_active[1]["pr_count"]
+            }
+        
+        if repo_activity:
+            # Find most active repository
+            most_active_repo = max(repo_activity.items(), key=lambda x: x[1])
+            activities["summary"]["most_active_repository"] = {
+                "repository": most_active_repo[0],
+                "activity_count": most_active_repo[1]
+            }
+        
+        return activities
+
+    def _get_all_repositories(self) -> List[str]:
+        """Get list of all accessible repository names"""
+        repos = []
+
+        if self.github_repositories: # A user might have a lot of repositories, this I added so that i can show only those I want to show.
+            return self.github_repositories
+
         try:
-            user = self.github.get_user()
-            return user.login
-        except GithubException:
-            return "unknown"
+            if self.organization:
+                org = self.github.get_organization(self.organization)
+                for repo in org.get_repos():
+                    repos.append(repo.name)
+            else:
+                for repo in self.github.get_user().get_repos():
+                    if self.github_repositories and repo.name not in self.github_repositories:
+                        continue
+                    repos.append(repo.name)
+        except GithubException as e:
+            print(f"Error fetching repository list: {e}")
+            return []
+            
+        return repos
+
     
     def test_connection(self) -> bool:
         """Test GitHub connection"""
@@ -387,3 +556,8 @@ class GitHubClient:
             return bool(user.login)
         except GithubException:
             return False
+
+    @property
+    @cached(ttl=3600)
+    def context(self) -> str:
+        return self.get_repositories_with_contributors()
