@@ -4,6 +4,7 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
 from app.core.config import settings
 from app.models.schemas import JiraIssue, JiraResponse, JiraIssueFilter
+from app.core.services.simple_cache import cached
 
 
 class JiraClient:
@@ -27,6 +28,7 @@ class JiraClient:
         """Check if JIRA client is properly configured"""
         return bool(self.server_url and self.email and self.api_token)
     
+    @cached(ttl=300)
     def search_issues(self, filters: JiraIssueFilter, max_results: int = 50) -> JiraResponse:
         """Search for JIRA issues based on filters"""
         if not self._is_configured() or not self.jira:
@@ -106,7 +108,8 @@ class JiraClient:
         except JIRAError as e:
             print(f"Error fetching JIRA issues: {e}")
             return JiraResponse(issues=[], total_count=0, filtered_count=0)
-    
+
+    @cached(ttl=300)
     def get_recent_activity(self, days: int = 7, team_members: Optional[List[str]] = None) -> JiraResponse:
         """Get recent JIRA activity for team members"""
         filters = JiraIssueFilter(
@@ -131,7 +134,8 @@ class JiraClient:
             )
         
         return self.search_issues(filters)
-    
+
+    @cached(ttl=300)
     def get_projects(self) -> List[Dict[str, Any]]:
         """Get list of all JIRA projects"""
         if not self._is_configured() or not self.jira:
@@ -151,7 +155,8 @@ class JiraClient:
         except JIRAError as e:
             print(f"Error fetching JIRA projects: {e}")
             return []
-    
+
+    @cached(ttl=300)    
     def get_project_users(self, project_key: str, max_results: int = 50) -> List[Dict[str, Any]]:
         """Get list of assignable users for a specific project"""
         if not self._is_configured() or not self.jira:
@@ -175,7 +180,8 @@ class JiraClient:
         except JIRAError as e:
             print(f"Error fetching project users: {e}")
             return []
-    
+
+    @cached(ttl=300)
     def search_users(self, query: str, max_results: int = 20) -> List[Dict[str, Any]]:
         """Search for users by name or email"""
         if not self._is_configured() or not self.jira:
@@ -195,7 +201,8 @@ class JiraClient:
         except JIRAError as e:
             print(f"Error searching users: {e}")
             return []
-    
+
+    @cached(ttl=300)    
     def get_issue_details(self, issue_key: str) -> Optional[Dict[str, Any]]:
         """Get detailed information about a specific issue"""
         if not self._is_configured() or not self.jira:
@@ -267,6 +274,7 @@ class JiraClient:
             return False
 
     @property
+    @cached(ttl=3600)
     def context(self) -> str:
         projects = self.get_projects()
 

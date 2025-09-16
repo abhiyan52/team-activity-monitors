@@ -3,6 +3,7 @@ from github.GithubException import GithubException
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta, timezone
 from app.core.config import settings
+from app.core.services.simple_cache import cached
 
 
 
@@ -28,7 +29,8 @@ class GitHubClient:
         else:
             user = self.github.get_user()
             return f"{user.login}/{repository}"
-        
+    
+    @cached(ttl=300)
     def get_pull_requests(
         self,
         author: Optional[str] = None,
@@ -132,6 +134,7 @@ class GitHubClient:
         # Sort by updated date (most recent first)
         return sorted(all_prs, key=lambda x: x['updated_at'] or '', reverse=True)
 
+    @cached(ttl=300)
     def get_commits(
         self,
         author: Optional[str] = None,
@@ -215,6 +218,7 @@ class GitHubClient:
         # Sort by date (most recent first)
         return sorted(all_commits, key=lambda x: x['date'] or '', reverse=True)
 
+    @cached(ttl=300)
     def get_repositories_with_contributors(self) -> List[Dict[str, Any]]:
         """
         Get all accessible repositories along with their contributors.
@@ -291,6 +295,7 @@ class GitHubClient:
 
         
         return sorted(repositories, key=lambda x: x['updated_at'] or '', reverse=True)
+
 
     def get_repository_details(self, repository: str) -> Optional[Dict[str, Any]]:
         """
@@ -399,6 +404,7 @@ class GitHubClient:
             print(f"Error fetching repository details for {repository}: {e}")
             return None
     
+    @cached(ttl=300)
     def get_recent_activities(
         self,
         usernames: List[str],
@@ -552,5 +558,6 @@ class GitHubClient:
             return False
 
     @property
+    @cached(ttl=3600)
     def context(self) -> str:
         return self.get_repositories_with_contributors()
